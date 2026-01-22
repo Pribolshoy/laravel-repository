@@ -1,0 +1,30 @@
+{
+    "name": "pribolshoy/laravel-repository",
+    "description": "Laravel repository pattern implementation",
+    "keywords": ["laravel", "repository", "eloquent"],
+    "license": "BSD-3-Clause",
+    "authors": [
+        {
+            "name": "Nikolay Pribolshoy",
+            "email": "pribolshoy@gmail.com"
+        }
+    ],
+    "minimum-stability": "dev",
+    "require": {
+        "php": ">=8.1",
+        "pribolshoy/repository": "^0.1",
+        "illuminate/support": "^10.0|^11.0",
+        "illuminate/database": "^10.0|^11.0",
+        "illuminate/cache": "^10.0|^11.0",
+        "illuminate/redis": "^10.0|^11.0"
+    },
+    "require-dev": {
+        "phpunit/phpunit": "^10.0|^11.0"
+    },
+    "autoload": {
+        "psr-4": {
+            "pribolshoy\\laravelrepository\\": "src"
+        }
+    }
+}
+
