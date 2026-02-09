@@ -7,28 +7,33 @@ use pribolshoy\repository\Logger;
 use Illuminate\Support\Facades\Redis;
 
 /**
- * Class RedisDriver
+ * Драйвер кеша для работы с Redis
  *
- * Redis have many different ways to fetch information,
- * then we can use strategies for setting specific way.
- * Also class have some auto-detection of right ways.
+ * Предоставляет функциональность для работы с Redis через Laravel фасады.
+ * Поддерживает различные стратегии работы с кешем: строковый кеш и хэш-таблицы.
  *
- * Strategies can be sets by params property.
- * Params come from service cache_params['get'] for get() method
- * and cache_params['set'] for set() method.
+ * Redis имеет множество способов получения информации, поэтому используются стратегии
+ * для выбора конкретного способа. Класс также имеет автоматическое определение
+ * правильного способа на основе формата ключа и параметров.
  *
- * Available strategies for get():
- * getValue - Get the value of a key (analog get($key)).
+ * Стратегии задаются через параметр 'strategy' в cache_params['get'] для метода get()
+ * и cache_params['set'] для метода set().
  *
- * getHValue - Get the value of a hash field (analog hget($key, $field)).
+ * Упрощенные стратегии (рекомендуемые):
+ * - 'string' - Использование строкового кеша (getValue, setex, del)
+ * - 'hash' или 'table' - Использование хэш-таблицы (getHValue/getHValues/getAllHash, hset, hdel)
+ *   Для get() с 'hash'/'table': автоматически выбирается getHValue, getHValues или getAllHash
+ *   на основе формата ключа и параметра fields
  *
- * getHValues - Get the values of all the given hash fields (analog hmget($key, ...$fields)).
- *
- * getAllHash - Get all the values in a hash (analog hvals($key)).
- *
- * Available strategies for set():
- * hset - Set hash field (analog hset($key, $field, $value)).
- * setex - Set key with expiration (analog setex($key, $ttl, $value)).
+ * Устаревшие стратегии (для обратной совместимости):
+ * - getValue - Получить значение ключа (аналог get($key))
+ * - getHValue - Получить значение поля хэша (аналог hget($key, $field))
+ * - getHValues - Получить значения всех указанных полей хэша (аналог hmget($key, ...$fields))
+ * - getAllHash - Получить все значения из хэша (аналог hvals($key))
+ * - hset - Установить поле хэша (аналог hset($key, $field, $value))
+ * - setex - Установить ключ с временем жизни (аналог setex($key, $ttl, $value))
+ * - hdel - Удалить поле хэша (аналог hdel($key, $field))
+ * - del - Удалить ключ (аналог del($key))
  *
  * @package pribolshoy\laravelrepository\drivers
  */
@@ -52,8 +57,13 @@ class RedisDriver extends BaseCacheDriver
      * Определяет поствикс (делимитер) для ключа кеша на основе параметров стратегии.
      * Анализирует cache_params['get'] и возвращает соответствующий делимитер.
      *
-     * Стратегии для хэш-таблицы: getAllHash, getHValue, getHValues, hset, hdel
-     * Стратегии для строкового кеша: getValue, setex, del
+     * Simplified strategies (recommended):
+     * 'string' - Use string cache (getValue, setex, del).
+     * 'hash' or 'table' - Use hash table (getHValue/getHValues/getAllHash, hset, hdel).
+     *
+     * Legacy strategies (for backward compatibility):
+     * getAllHash, getHValue, getHValues, hset, hdel - hash table
+     * getValue, setex, del - string cache
      *
      * @param array $cacheParamsGet Параметры из cache_params['get']
      * @return string Делимитер для использования в ключе кеша
@@ -62,9 +72,16 @@ class RedisDriver extends BaseCacheDriver
     {
         $strategy = $cacheParamsGet['strategy'] ?? 'getValue';
 
-        // Стратегии для хэш-таблицы
+        // Новые упрощенные стратегии
+        if ($strategy === 'string') {
+            return Config::getStringDelimiter();
+        } else if ($strategy === 'hash' || $strategy === 'table') {
+            return Config::getHashDelimiter();
+        }
+
+        // Обратная совместимость: старые стратегии для хэш-таблицы
         $hashStrategies = ['getAllHash', 'getHValue', 'getHValues', 'hset', 'hdel'];
-        
+
         if (in_array($strategy, $hashStrategies)) {
             return Config::getHashDelimiter();
         }
@@ -74,30 +91,62 @@ class RedisDriver extends BaseCacheDriver
     }
 
     /**
-     * Get data from cache.
-     * Params should come from service cache_params['get'].
+     * Получить данные из кеша
      *
-     * @param string $key
-     * @param array $params Parameters from cache_params['get']
-     * @return array|mixed
+     * Параметры должны приходить из cache_params['get'] сервиса.
+     * Выбирает стратегию получения данных на основе параметра 'strategy'.
+     *
+     * Упрощенные стратегии (рекомендуемые):
+     * - 'string' - Использование строкового кеша (getValue)
+     * - 'hash' или 'table' - Использование хэш-таблицы (getHValue/getHValues/getAllHash)
+     *   Для 'hash'/'table': автоматически выбирается getHValue, getHValues или getAllHash
+     *   на основе формата ключа и параметра fields
+     *
+     * Устаревшие стратегии (для обратной совместимости):
+     * - getValue, getHValue, getHValues, getAllHash
+     *
+     * @param string $key Ключ кеша
+     * @param array $params Параметры из cache_params['get']
+     * @return array|mixed Десериализованные данные из кеша или пустой массив
+     * @throws \RuntimeException Если указанная стратегия не существует
      */
     public function get(string $key, array $params = [])
     {
-        // default strategy
-        $strategy = $params['strategy'] ?? 'getValue';
+        $strategy = $params['strategy'] ?? null;
         $fields = $params['fields'] ?? [];
 
-        if ($strategy == 'getAllHash') {
-            $strategy = 'getAllHash';
-        } elseif ($fields && $strategy !== 'getHValues') {
-            $strategy = 'getHValues';
+        // Упрощенная логика: если strategy = 'string' или 'hash'/'table', определяем метод автоматически
+        if ($strategy === 'string') {
+            $strategy = 'getValue';
+        } elseif ($strategy === 'hash' || $strategy === 'table') {
+            // Автоматический выбор метода для хэш-таблицы
+            if ($fields) {
+                $strategy = 'getHValues';
+            } else {
+                $delimiter = Config::getHashDelimiter();
+                $delimiterEscaped = preg_quote($delimiter, '#');
+                if (preg_match('#' . $delimiterEscaped . '#i', $key)) {
+                    $strategy = 'getHValue';
+                } else {
+                    $strategy = 'getAllHash';
+                }
+            }
         } else {
-            $delimiter = Config::getHashDelimiter();
-            $delimiterEscaped = preg_quote($delimiter, '#');
-            if (preg_match('#' . $delimiterEscaped . '#i', $key)
-                && $strategy !== 'getHValue'
-            ) {
-                $strategy = 'getHValue';
+            // Обратная совместимость: старые стратегии
+            if ($strategy == 'getAllHash') {
+                $strategy = 'getAllHash';
+            } elseif ($fields && $strategy !== 'getHValues') {
+                $strategy = 'getHValues';
+            } else {
+                $delimiter = Config::getHashDelimiter();
+                $delimiterEscaped = preg_quote($delimiter, '#');
+                if (preg_match('#' . $delimiterEscaped . '#i', $key)
+                    && $strategy !== 'getHValue'
+                ) {
+                    $strategy = 'getHValue';
+                } else {
+                    $strategy = $strategy ?? 'getValue';
+                }
             }
         }
 
@@ -106,10 +155,10 @@ class RedisDriver extends BaseCacheDriver
         if (!method_exists($this, $strategy)) {
             throw new \RuntimeException("Метод $strategy не существует в " . __CLASS__);
         }
-        
+
         $result = $this->{$strategy}($key, $params) ?? [];
         Logger::log('get', $key, 'cache', $result);
-        
+
         return $result;
     }
 
@@ -132,7 +181,7 @@ class RedisDriver extends BaseCacheDriver
 
         $result = $data ?? [];
         Logger::log('getAllHash', $key, 'cache', $result);
-        
+
         return $result;
     }
 
@@ -150,7 +199,7 @@ class RedisDriver extends BaseCacheDriver
         $data = Redis::get($key);
         $result = $data ? $this->unserialize($data) : [];
         Logger::log('getValue', $key, 'cache', $result);
-        
+
         return $result;
     }
 
@@ -169,7 +218,7 @@ class RedisDriver extends BaseCacheDriver
         $originalKey = $key;
         $delimiter = Config::getHashDelimiter();
         $delimiterEscaped = preg_quote($delimiter, '#');
-        
+
         // Делимитер отделяет только ИД (последняя часть), остальное - ключ хеша
         if (preg_match('#' . $delimiterEscaped . '(.*)$#', $key, $matches)) {
             $field = $matches[1];
@@ -184,7 +233,7 @@ class RedisDriver extends BaseCacheDriver
         $data = Redis::hget($key, $field);
         $result = $data ? $this->unserialize($data): [];
         Logger::log('getHValue', $originalKey, 'cache', $result);
-        
+
         return $result;
     }
 
@@ -204,7 +253,7 @@ class RedisDriver extends BaseCacheDriver
             $fieldsChunks = array_chunk($fields, $this->maxHMgetLimit);
 
             foreach ($fieldsChunks as $fieldsChunk) {
-                if ($items = Redis::hmget($key, ...$fieldsChunk)) {
+                if ($items = Redis::hmget($key, $fieldsChunk)) {
                     $items = array_filter($items);
                     foreach ($items as $item) {
                         $data[] = $this->unserialize($item);
@@ -215,24 +264,43 @@ class RedisDriver extends BaseCacheDriver
 
         $result = $data ?? [];
         Logger::log('getHValues', $key, 'cache', $result);
-        
+
         return $result;
     }
 
     /**
-     * Set data to cache.
-     * Params should come from service cache_params['set'].
+     * Установить данные в кеш
      *
-     * @param string $key
-     * @param mixed $value
-     * @param int $cache_duration
-     * @param array $params Parameters from cache_params['set']
-     * @return object
+     * Параметры должны приходить из cache_params['set'] сервиса.
+     * Выбирает стратегию сохранения данных на основе параметра 'strategy'.
+     *
+     * Упрощенные стратегии (рекомендуемые):
+     * - 'string' - Использование строкового кеша (setex)
+     * - 'hash' или 'table' - Использование хэш-таблицы (hset)
+     *
+     * Устаревшие стратегии (для обратной совместимости):
+     * - hset, setex
+     *
+     * @param string $key Ключ кеша
+     * @param mixed $value Значение для сохранения (будет сериализовано и сжато)
+     * @param int $cache_duration Время жизни кеша в секундах
+     * @param array $params Параметры из cache_params['set']
+     * @return object Возвращает $this для цепочки вызовов
+     * @throws \RuntimeException Если указанная стратегия не существует
      */
     public function set(string $key, $value, int $cache_duration = 0, array $params = []): object
     {
-        // по умолчанию хеш таблица
-        $strategy = $params['strategy'] ?? 'hset';
+        $strategy = $params['strategy'] ?? null;
+
+        // Упрощенная логика: если strategy = 'string' или 'hash'/'table', выбираем метод
+        if ($strategy === 'string') {
+            $strategy = 'setex';
+        } else if ($strategy === 'hash' || $strategy === 'table') {
+            $strategy = 'hset';
+        } else {
+            // Обратная совместимость: по умолчанию хеш таблица
+            $strategy = $strategy ?? 'hset';
+        }
 
         if (!method_exists($this, $strategy)) {
             throw new \RuntimeException("Метод $strategy не существует в " . __CLASS__);
@@ -240,7 +308,7 @@ class RedisDriver extends BaseCacheDriver
 
         $result = $this->{$strategy}($key, $value, $cache_duration, $params);
         Logger::log('set', $key, 'cache');
-        
+
         return $result;
     }
 
@@ -259,7 +327,7 @@ class RedisDriver extends BaseCacheDriver
     {
         Redis::setex($key, $cache_duration, $this->serialize($value));
         Logger::log('setex', $key, 'cache');
-        
+
         return $this;
     }
 
@@ -281,7 +349,7 @@ class RedisDriver extends BaseCacheDriver
         $originalKey = $key;
         $delimiter = Config::getHashDelimiter();
         $delimiterEscaped = preg_quote($delimiter, '#');
-        
+
         // Делимитер отделяет только ИД (последняя часть), остальное - ключ хеша
         if (preg_match('#' . $delimiterEscaped . '(.*)$#', $key, $matches)) {
             $field = $matches[1];
@@ -294,26 +362,42 @@ class RedisDriver extends BaseCacheDriver
         } else {
             $this->setex($key, $value, $cache_duration, $params);
         }
-        
+
         Logger::log('hset', $originalKey, 'cache');
-        
+
         return $this;
     }
 
     /**
-     * Удалить ключ или поле из кеша.
-     * Выбирает стратегию удаления на основе параметров (по умолчанию hdel для хэш-таблицы).
+     * Удалить ключ или поле из кеша
+     *
+     * Выбирает стратегию удаления на основе параметра 'strategy'.
+     *
+     * Упрощенные стратегии (рекомендуемые):
+     * - 'string' - Использование строкового кеша (del)
+     * - 'hash' или 'table' - Использование хэш-таблицы (hdel)
+     *
+     * Устаревшие стратегии (для обратной совместимости):
+     * - hdel, del
      *
      * @param string $key Ключ для удаления
      * @param array $params Параметры, могут содержать 'strategy' для выбора метода удаления
-     *
      * @return object Возвращает $this для цепочки вызовов
      * @throws \RuntimeException Если указанная стратегия не существует
      */
     public function delete(string $key, array $params = []): object
     {
-        // по умолчанию хеш таблица
-        $strategy = $params['strategy'] ?? 'hdel';
+        $strategy = $params['strategy'] ?? null;
+
+        // Упрощенная логика: если strategy = 'string' или 'hash'/'table', выбираем метод
+        if ($strategy === 'string') {
+            $strategy = 'del';
+        } else if ($strategy === 'hash' || $strategy === 'table') {
+            $strategy = 'hdel';
+        } else {
+            // Обратная совместимость: по умолчанию хеш таблица
+            $strategy = $strategy ?? 'hdel';
+        }
 
         if (!method_exists($this, $strategy)) {
             throw new \RuntimeException("Метод $strategy не существует в " . __CLASS__);
@@ -321,7 +405,7 @@ class RedisDriver extends BaseCacheDriver
 
         $result = $this->{$strategy}($key, $params);
         Logger::log('delete', $key, 'cache');
-        
+
         return $result;
     }
 
@@ -338,7 +422,7 @@ class RedisDriver extends BaseCacheDriver
     {
         Redis::del($key);
         Logger::log('del', $key, 'cache');
-        
+
         return $this;
     }
 
@@ -359,7 +443,7 @@ class RedisDriver extends BaseCacheDriver
         $originalKey = $key;
         $delimiter = Config::getHashDelimiter();
         $delimiterEscaped = preg_quote($delimiter, '#');
-        
+
         // Делимитер отделяет только ИД (последняя часть), остальное - ключ хеша
         if (preg_match('#' . $delimiterEscaped . '(.*)$#', $key, $matches)) {
             $field = $matches[1];
@@ -373,9 +457,9 @@ class RedisDriver extends BaseCacheDriver
         } else {
             $this->del($key, $params);
         }
-        
+
         Logger::log('hdel', $originalKey, 'cache');
-        
+
         return $this;
     }
 

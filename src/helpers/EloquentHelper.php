@@ -3,36 +3,52 @@
 namespace pribolshoy\laravelrepository\helpers;
 
 use Illuminate\Database\Eloquent\Model;
+use pribolshoy\repository\interfaces\RepositoryInterface;
 
 /**
- * Trait EloquentHelper
- * Трейт со вспомогательными свойствами и реализацией
- * методов для классов наследующих AbstractEloquentRepository.
+ * Трейт со вспомогательными свойствами и методами для Eloquent репозиториев
+ *
+ * Предоставляет функциональность для работы с сортировкой, фильтрацией
+ * и кешированием в репозиториях, работающих с Eloquent моделями.
+ *
+ * Может использоваться только в классах, реализующих RepositoryInterface.
  *
  * @package pribolshoy\laravelrepository\helpers
  */
 trait EloquentHelper
 {
-    protected $entity;
-
+    /**
+     * Значение для обозначения несуществующих элементов
+     *
+     * @var int
+     */
     public int $not_exists_value = 999999999;
 
     /**
-     * Метод возвращает массив доступных значений orderBy
-     * Может переписываться в наследнике чтоб
-     * возвращать статичные данные
+     * Получить массив доступных значений для сортировки (orderBy)
+     *
+     * Возвращает список полей, по которым можно сортировать данные.
+     * Сначала пытается получить список через метод getOrdersBy() модели,
+     * если метод отсутствует - использует fillable атрибуты модели.
+     * Для каждого поля добавляется вариант с префиксом имени таблицы.
+     *
+     * Может быть переопределен в дочерних классах для возврата статичных данных.
+     *
+     * @return array Массив доступных полей для сортировки
+     * @throws \RuntimeException Если трейт используется не в классе, реализующем RepositoryInterface
      */
     protected function getAvailableOrdersBy()
     {
+        if (!($this instanceof RepositoryInterface)) {
+            throw new \RuntimeException('Trait EloquentHelper can only be used in classes implementing RepositoryInterface');
+        }
         $result = [];
 
-        if (!isset($this->entity)) {
-            $this->entity = $this->getModel();
-        }
+        $entity = $this->getQueryBuilderInstance();
 
-        if (isset($this->entity)) {
-            if (method_exists($this->entity, 'getOrdersBy')) {
-                if ($orders = $this->entity->getOrdersBy()) {
+        if ($entity) {
+            if (method_exists($entity, 'getOrdersBy')) {
+                if ($orders = $entity->getOrdersBy()) {
                     $result = $orders;
 
                     foreach ($orders as $order) {
@@ -41,7 +57,7 @@ trait EloquentHelper
                 }
             } else {
                 // Получаем fillable атрибуты модели
-                $fillable = $this->entity->getFillable();
+                $fillable = $entity->getFillable();
                 foreach ($fillable as $attribute) {
                     $result[] = $attribute;
                     $result[] = $this->getTableName() . '.' . $attribute;
@@ -54,38 +70,35 @@ trait EloquentHelper
         return [];
     }
 
-    /**
-     * Является ли строка сортировки
-     *
-     * @param string $sorting
-     * @param string $delimiter
-     *
-     * @return bool
-     */
-    public function isSortingWithDelimiter(string $sorting, string $delimiter = '-')
-    {
-        return (bool)(stripos($sorting, $delimiter)
-            && count(explode($delimiter, $sorting)) === 2);
-    }
 
     /**
-     * Сбор фильтров сортировок из параметров
+     * Сбор фильтров сортировок из параметров запроса
      *
-     * $return $this
+     * Обрабатывает параметр 'sort' из запроса и преобразует его в фильтры сортировки.
+     * Поддерживает:
+     * - Массивы сортировок
+     * - Строки с делимитером (например, "name-asc")
+     * - Одиночные значения (по умолчанию SORT_DESC)
+     *
+     * @return $this
+     * @throws \RuntimeException Если трейт используется не в классе, реализующем RepositoryInterface
      */
     public function collectSortingByParam()
     {
+        if (!($this instanceof RepositoryInterface)) {
+            throw new \RuntimeException('Trait EloquentHelper can only be used in classes implementing RepositoryInterface');
+        }
         if (!$this->existsParam('sort')) {
             $this->addFilterValueByParams('sort', SORT_DESC, false);
             return $this;
         }
 
-        $sort = $this->getParams()['sort'];
+        $sort = $this->getParam('sort');
 
         if (is_array($sort)) {
             $i = 0;
             // обнуляем фильтр sort
-            $this->getFilters()['sort'] = null;
+            $this->addFilterValue('sort', null, false);
 
             foreach ($sort as $sort_part) {
                 if ($this->isSortingWithDelimiter($sort_part)) {
@@ -106,17 +119,23 @@ trait EloquentHelper
     }
 
     /**
-     * Сбор фильтров сортировок из переданной строки
-     * с делимитером.
+     * Сбор фильтров сортировок из переданной строки с делимитером
      *
-     * @param string $sorting
-     * @param string $delimiter
-     * @param bool $append
+     * Парсит строку вида "field-direction" (например, "name-asc" или "created_at-desc")
+     * и добавляет соответствующие фильтры сортировки. Проверяет, что поле доступно
+     * для сортировки через getAvailableOrdersBy().
      *
+     * @param string $sorting Строка сортировки в формате "field-direction"
+     * @param string $delimiter Разделитель между полем и направлением (по умолчанию '-')
+     * @param bool $append Добавлять к существующим фильтрам или заменять их
      * @return $this
+     * @throws \RuntimeException Если трейт используется не в классе, реализующем RepositoryInterface
      */
     public function collectSortingWithDelimiter(string $sorting, string $delimiter = '-', bool $append = true)
     {
+        if (!($this instanceof RepositoryInterface)) {
+            throw new \RuntimeException('Trait EloquentHelper can only be used in classes implementing RepositoryInterface');
+        }
         $sort_parts = explode($delimiter, $sorting);
 
         if (count($sort_parts) === 2) {
@@ -135,16 +154,30 @@ trait EloquentHelper
         return $this;
     }
 
+    /**
+     * Получить массив сортировок из фильтра
+     *
+     * Извлекает параметры сортировки из фильтра и возвращает их в виде массива
+     * [column => direction]. Поддерживает множественные сортировки.
+     * Проверяет доступность полей для сортировки через getAvailableOrdersBy().
+     *
+     * @param bool $clear_columns Убрать префикс таблицы из имен колонок
+     * @return array|null Массив сортировок [column => direction] или null, если сортировка не задана
+     * @throws \RuntimeException Если трейт используется не в классе, реализующем RepositoryInterface
+     */
     public function getOrderbyByFilter(bool $clear_columns = false)
     {
+        if (!($this instanceof RepositoryInterface)) {
+            throw new \RuntimeException('Trait EloquentHelper can only be used in classes implementing RepositoryInterface');
+        }
         if (!$this->existsFilter('orderBy')) {
             return null;
         }
 
         $result = [];
 
-        $orderBy = $this->getFilters()['orderBy'];
-        $sort = $this->getFilters()['sort'] ?? SORT_DESC;
+        $orderBy = $this->getFilter('orderBy');
+        $sort = $this->getFilter('sort') ?? SORT_DESC;
 
         // если массив сортировок
         if (is_array($orderBy)) {
@@ -192,131 +225,43 @@ trait EloquentHelper
         return $result ?? null;
     }
 
-    public function existsParam(string $name)
-    {
-        if (!isset($this->getParams()[$name])) {
-            return false;
-        }
-        if (!$this->getParams()[$name]) {
-            return false;
-        }
-        return true;
-    }
-
-    public function existsFilter(string $name)
-    {
-        if (!isset($this->getFilters()[$name])) {
-            return false;
-        }
-        if (!$this->getFilters()[$name]) {
-            return false;
-        }
-        return true;
-    }
-
     /**
-     * Добавление значения из self::params в self::filter при
-     * условии что оно существует
+     * Проверить, является ли строка сортировкой с делимитером
      *
-     * @param $value
-     * @param string $default_value
-     * @param bool $append
+     * Проверяет, содержит ли строка делимитер и состоит ли она из двух частей
+     * (поле и направление сортировки).
      *
-     * @return array|void|string
+     * @param string $sorting Строка для проверки
+     * @param string $delimiter Разделитель (по умолчанию '-')
+     * @return bool true если строка является сортировкой с делимитером
+     * @throws \RuntimeException Если трейт используется не в классе, реализующем RepositoryInterface
      */
-    public function addFilterValueByParams($value, $default_value = '', $append = true)
+    public function isSortingWithDelimiter(string $sorting, string $delimiter = '-')
     {
-        // если существует такой параметр
-        if (isset($this->params[$value])) {
-            if (is_array($this->params[$value])) {
-
-                if (!empty($this->filter[$value]) && $append) {
-
-                    if (is_array($this->filter[$value])) {
-                        $this->filter[$value] = array_merge($this->filter[$value], $this->params[$value]);
-                    } else {
-                        $this->filter[$value] = array_merge([$this->filter[$value]], $this->params[$value]);
-                    }
-
-                } else {
-                    $this->filter[$value] = $this->params[$value];
-                }
-
-            } else {
-                $parts = explode(',', $this->params[$value]);
-
-                if (count($parts) > 1) {
-
-                    if (!empty($this->filter[$value]) && $append) {
-
-                        if (is_array($this->filter[$value])) {
-                            $this->filter[$value] = array_merge($this->filter[$value], $parts);
-                        } else {
-                            $this->filter[$value] = array_merge([$this->filter[$value]], $parts);
-                        }
-
-                    } else {
-                        $this->filter[$value] = $parts;
-                    }
-
-                } else {
-                    if (!empty($this->filter[$value]) && $append) {
-
-                        if (is_array($this->filter[$value])) {
-                            $this->filter[$value] = array_merge($this->filter[$value], is_array($this->params[$value]) ?: [$this->params[$value]]);
-                        } else {
-                            $this->filter[$value] = array_merge([$this->filter[$value]], is_array($this->params[$value]) ?: [$this->params[$value]]);
-                        }
-
-                    } else {
-                        $this->filter[$value] = $this->params[$value];
-                    }
-                }
-            }
-        } elseif (strlen($default_value)) {
-            $this->filter[$value] = $default_value;
-        } elseif (is_bool($default_value)) {
-            $this->filter[$value] = $default_value;
+        if (!($this instanceof RepositoryInterface)) {
+            throw new \RuntimeException('Trait EloquentHelper can only be used in classes implementing RepositoryInterface');
         }
-
-        return strlen($this->filter[$value] ?? null);
+        return (bool)(stripos($sorting, $delimiter)
+            && count(explode($delimiter, $sorting)) === 2);
     }
 
     /**
-     * Присоединить значение к фильтру
+     * Пересечение массивов
      *
-     * @param $filter_key
-     * @param $value
-     * @param bool $append
-     * @return array|void|string
-     */
-    public function addFilterValue($filter_key, $value, $append = true)
-    {
-        if (!empty($this->filter[$filter_key]) && $append) {
-
-            if (is_array($this->filter[$filter_key])) {
-                $this->filter[$filter_key] = array_merge($this->filter[$filter_key], [$value]);
-            } else {
-                $this->filter[$filter_key] = array_merge([$this->filter[$filter_key]], [$value]);
-            }
-
-        } else {
-            $this->filter[$filter_key] = $value;
-        }
-
-        return $this->filter[$filter_key];
-    }
-
-    /**
-     * Соединение воедино массивов, в итоге остаются
-     * только пересекающиеся значения
+     * Возвращает массив, содержащий только значения, присутствующие в обоих массивах.
+     * Если пересечение пустое, возвращает массив с одним элементом not_exists_value.
+     * Если один из массивов пуст, возвращает другой массив.
      *
-     * @param $array_1
-     * @param $array_2
-     * @return array|void|string
+     * @param array|mixed $array_1 Первый массив
+     * @param array|mixed $array_2 Второй массив
+     * @return array Массив пересекающихся значений, один из исходных массивов или [not_exists_value]
+     * @throws \RuntimeException Если трейт используется не в классе, реализующем RepositoryInterface
      */
     public function mergeIntersect($array_1, $array_2)
     {
+        if (!($this instanceof RepositoryInterface)) {
+            throw new \RuntimeException('Trait EloquentHelper can only be used in classes implementing RepositoryInterface');
+        }
         if ($array_1 && $array_2) {
             $result = array_intersect($array_1, $array_2);
             if (empty($result)) {
@@ -332,15 +277,21 @@ trait EloquentHelper
     }
 
     /**
-     * TODO: удалить за ненадобностью. Функционал перенести в сервис
-     * Получить наименование кеша для total
-     * по текущим параметрам.
-     * Из параметров удаляется атрибут page, cache
+     * Получить наименование кеша для total по текущим параметрам
      *
-     * @return string|null
+     * Генерирует имя ключа кеша для хранения общего количества элементов.
+     * Из параметров исключаются атрибуты page, cache и offset.
+     *
+     * @deprecated TODO: удалить за ненадобностью. Функционал перенести в сервис
+     *
+     * @return string Имя ключа кеша для total или пустая строка
+     * @throws \RuntimeException Если трейт используется не в классе, реализующем RepositoryInterface
      */
     public function getTotalHashName()
     {
+        if (!($this instanceof RepositoryInterface)) {
+            throw new \RuntimeException('Trait EloquentHelper can only be used in classes implementing RepositoryInterface');
+        }
         $hash_name = $this->getTotalHashPrefix();
 
         if ($this->filter) {

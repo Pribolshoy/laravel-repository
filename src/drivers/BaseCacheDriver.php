@@ -4,12 +4,35 @@ namespace pribolshoy\laravelrepository\drivers;
 
 use pribolshoy\repository\drivers\AbstractCacheDriver;
 
+/**
+ * Базовый класс драйвера кеша для Laravel
+ *
+ * Предоставляет базовую функциональность для работы с контейнером приложения Laravel.
+ * Дочерние классы должны реализовать методы get(), set() и delete().
+ *
+ * @package pribolshoy\laravelrepository\drivers
+ */
 abstract class BaseCacheDriver extends AbstractCacheDriver
 {
-    protected string $component = 'redis';
+    /**
+     * Имя компонента в контейнере Laravel
+     *
+     * @var string
+     */
+    protected string $component = 'cache';
 
+    /**
+     * Кэшированный экземпляр контейнера приложения
+     *
+     * @var object|null
+     */
     protected ?object $container = null;
 
+    /**
+     * Класс или callable для создания контейнера
+     *
+     * @var object|null
+     */
     protected ?object $container_class = null;
 
     /**
@@ -45,7 +68,7 @@ abstract class BaseCacheDriver extends AbstractCacheDriver
     /**
      * Получить компонент из контейнера.
      * В Laravel компоненты получаются через контейнер приложения.
-     * 
+     *
      * Метод может быть переопределен в дочерних классах для использования
      * фасадов Laravel напрямую (что является предпочтительным подходом).
      *
@@ -54,12 +77,12 @@ abstract class BaseCacheDriver extends AbstractCacheDriver
     protected function getComponent()
     {
         $container = $this->getContainer();
-        
+
         // Если это Laravel контейнер, получаем сервис по имени
         if (method_exists($container, 'make')) {
             return $container->make($this->component);
         }
-        
+
         // Иначе используем старый подход через свойство
         return $container->{$this->component} ?? null;
     }
